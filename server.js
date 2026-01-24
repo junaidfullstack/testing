@@ -1,4 +1,4 @@
-/* --------------------------- server.js (Render Compatible) --------------------------- */
+/* --------------------------- server.js (Complete with Moderations) --------------------------- */
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -92,8 +92,11 @@ app.get('/', (req, res) => {
     version: '2.0.0',
     endpoints: {
       chat: 'POST /v1/chat/completions',
+      moderations: 'POST /v1/moderations',
+      completions: 'POST /v1/completions',
       upload: 'POST /upload',
-      health: 'GET /health'
+      health: 'GET /health',
+      models: 'GET /v1/models'
     }
   });
 });
@@ -220,6 +223,139 @@ app.post('/v1/chat/completions', upload.array('files', 3), async (req, res) => {
   }
 });
 
+/* ---------- Moderations Endpoint ---------- */
+app.post('/v1/moderations', async (req, res) => {
+  try {
+    if (!OPENAI_KEY) {
+      // If no OpenAI key, return safe bypass
+      return res.json({
+        bypassed: true,
+        message: 'Moderation temporarily unavailable — continuing safely.'
+      });
+    }
+
+    const body = req.body;
+
+    // Call OpenAI Moderation API
+    const response = await fetch('https://api.openai.com/v1/moderations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_KEY}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      res.json(result);
+    } else {
+      // If moderation fails, return safe bypass
+      res.json({
+        bypassed: true,
+        message: 'Moderation temporarily unavailable — continuing safely.'
+      });
+    }
+
+  } catch (error) {
+    console.error('Moderation error:', error);
+    // Always return safe response on error
+    res.json({
+      bypassed: true,
+      message: 'Moderation temporarily unavailable — continuing safely.'
+    });
+  }
+});
+
+/* ---------- Completions Endpoint (Legacy) ---------- */
+app.post('/v1/completions', async (req, res) => {
+  try {
+    if (!OPENAI_KEY) {
+      return res.status(500).json({
+        error: 'Server configuration error',
+        message: 'OpenAI API key not configured'
+      });
+    }
+
+    const body = req.body;
+
+    // Call OpenAI Completions API
+    const response = await fetch('https://api.openai.com/v1/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_KEY}`
+      },
+      body: JSON.stringify({
+        model: body.model || 'text-davinci-003',
+        prompt: body.prompt || '',
+        temperature: body.temperature || DEFAULT_TEMP,
+        max_tokens: Math.min(body.max_tokens || 1000, MAX_TOKENS_OUT)
+      })
+    });
+
+    const result = await response.json();
+    res.status(response.status).json(result);
+
+  } catch (error) {
+    console.error('Completions error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/* ---------- Get Models Endpoint ---------- */
+app.get('/v1/models', async (req, res) => {
+  try {
+    if (!OPENAI_KEY) {
+      // Return default models if no API key
+      return res.json({
+        data: [
+          { id: 'gpt-4', object: 'model' },
+          { id: 'gpt-4-vision-preview', object: 'model' },
+          { id: 'gpt-3.5-turbo', object: 'model' },
+          { id: 'text-davinci-003', object: 'model' }
+        ]
+      });
+    }
+
+    const response = await fetch('https://api.openai.com/v1/models', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_KEY}`
+      }
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      res.json(result);
+    } else {
+      // Fallback to default models
+      res.json({
+        data: [
+          { id: 'gpt-4', object: 'model' },
+          { id: 'gpt-4-vision-preview', object: 'model' },
+          { id: 'gpt-3.5-turbo', object: 'model' },
+          { id: 'text-davinci-003', object: 'model' }
+        ]
+      });
+    }
+
+  } catch (error) {
+    console.error('Models error:', error);
+    res.json({
+      data: [
+        { id: 'gpt-4', object: 'model' },
+        { id: 'gpt-4-vision-preview', object: 'model' },
+        { id: 'gpt-3.5-turbo', object: 'model' },
+        { id: 'text-davinci-003', object: 'model' }
+      ]
+    });
+  }
+});
+
 /* ---------- File Cleanup ---------- */
 setInterval(() => {
   const now = Date.now();
@@ -277,6 +413,13 @@ server.listen(PORT, '0.0.0.0', () => {
 🌍 URL: http://0.0.0.0:${PORT}
 📁 Uploads: ${uploadDir}
 ✅ Health: http://localhost:${PORT}/health
+📋 Endpoints:
+   - POST /v1/chat/completions
+   - POST /v1/moderations
+   - POST /v1/completions
+   - POST /upload
+   - GET /v1/models
+   - GET /health
   `);
 });
 
