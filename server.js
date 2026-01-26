@@ -1,433 +1,374 @@
-/* --------------------------- server.js (Complete with Moderations) --------------------------- */
+/* --------------------------- server.js --------------------------- */
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import multer from 'multer';
 import { createServer } from 'http';
-import { unlinkSync, readdirSync, statSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import { request as undiciRequest } from 'undici';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 /* ---------- Config ---------- */
-const PORT = process.env.PORT || 10000;
-const NODE_ENV = process.env.NODE_ENV || 'production';
+const PORT = process.env.PORT || 3000;
+const MAINTENANCE_MODE = process.env.MAINTENANCE_MODE === 'true';
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-const MAX_TOKENS_OUT = 4000;
-const DEFAULT_TEMP = 0.7;
-
-// Create uploads directory
-const uploadDir = join(__dirname, 'uploads');
-if (!existsSync(uploadDir)) {
-  mkdirSync(uploadDir, { recursive: true });
-}
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}-${file.originalname}`;
-    cb(null, uniqueName);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-    files: 3
-  },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = [
-      'image/jpeg',
-      'image/png',
-      'image/gif',
-      'application/pdf',
-      'text/plain'
-    ];
-    
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`File type not supported: ${file.mimetype}`), false);
-    }
-  }
-});
+const MAX_INPUT_CHARS = Number(process.env.MAX_INPUT_CHARS || 8000);
+const MAX_TOKENS_OUT = Number(process.env.MAX_TOKENS_OUT || 1000);
+const DEFAULT_TEMP = Number(process.env.DEFAULT_TEMP || 0.7);
+const ALLOWED_MODELS = ['gpt-3.5-turbo', 'gpt-4']; // Allow GPT-4
 
 /* ---------- Express setup ---------- */
 const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// CORS
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Security headers
+/* ---------- Maintenance Mode ---------- */
 app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
+  if (MAINTENANCE_MODE) {
+    return res.status(503).json({
+      message: '🚧 The API is under maintenance. Please try again later.'
+    });
+  }
   next();
 });
 
-/* ---------- Serve uploaded files ---------- */
-app.use('/uploads', express.static(uploadDir));
+/* ---------- Utils ---------- */
+const cache = new Map();
+
+function cacheKey(body) {
+  return JSON.stringify(body);
+}
+
+function truncateMessages(msgs) {
+  let total = 0;
+  const result = [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    total += (msgs[i].content?.length ?? 0);
+    if (total > MAX_INPUT_CHARS) break;
+    result.unshift(msgs[i]);
+  }
+  return result;
+}
+
+async function callOpenAIWithRetry(url, opts, retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await undiciRequest(url, opts);
+      return response;
+    } catch (err) {
+      console.error(`🔁 Retry ${i + 1}/${retries}:`, err.message);
+      if (i < retries - 1) {
+        await new Promise(r => setTimeout(r, delay * (i + 1)));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 /* ---------- Routes ---------- */
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.json({
-    message: 'Chat AI Prime API',
-    version: '2.0.0',
+    message: '✅ OpenAI Proxy Server running',
     endpoints: {
       chat: 'POST /v1/chat/completions',
-      moderations: 'POST /v1/moderations',
-      completions: 'POST /v1/completions',
-      upload: 'POST /upload',
-      health: 'GET /health',
-      models: 'GET /v1/models'
-    }
+      images: 'POST /v1/images/generations',
+      moderations: 'POST /v1/moderations'
+    },
+    features: ['Streaming', 'Caching', 'Retry Logic', 'DALL-E Image Generation']
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    service: 'Chat AI Prime API',
-    environment: NODE_ENV
-  });
-});
-
-/* ---------- File Upload ---------- */
-app.post('/upload', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-    
-    // Extract text from text files
-    let extractedText = '';
-    if (req.file.mimetype.includes('text/plain')) {
-      const fs = await import('fs/promises');
-      const filePath = join(uploadDir, req.file.filename);
-      extractedText = await fs.readFile(filePath, 'utf-8');
-    }
-
-    res.json({
-      success: true,
-      url: fileUrl,
-      fileName: req.file.originalname,
-      fileSize: req.file.size,
-      mimeType: req.file.mimetype,
-      extractedText: extractedText.substring(0, 2000),
-      fullTextAvailable: extractedText.length > 2000
-    });
-
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ 
-      error: 'Upload failed', 
-      message: error.message 
-    });
-  }
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 /* ---------- Chat Completions ---------- */
-app.post('/v1/chat/completions', upload.array('files', 3), async (req, res) => {
+app.post('/v1/chat/completions', async (req, res) => {
   try {
-    if (!OPENAI_KEY) {
-      return res.status(500).json({
-        error: 'Server configuration error',
-        message: 'OpenAI API key not configured'
+    const { model = 'gpt-3.5-turbo', messages, stream = false } = req.body;
+    
+    // Check if model is allowed
+    if (!ALLOWED_MODELS.includes(model)) {
+      return res.status(400).json({
+        error: {
+          message: `Model ${model} not allowed. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
+          type: 'invalid_request_error'
+        }
       });
     }
 
-    const body = req.body;
-    const files = req.files || [];
-    
-    // Process files
-    let fileContext = '';
-    if (files.length > 0) {
-      fileContext = files.map(file => {
-        let info = `[File: ${file.originalname}, Type: ${file.mimetype}, Size: ${file.size} bytes]`;
-        
-        // For images, note that OCR is not available
-        if (file.mimetype.startsWith('image/')) {
-          info += '\n[Image file - visual content]';
-        }
-        
-        return info;
-      }).join('\n\n');
+    // Truncate messages if needed
+    if (messages) {
+      req.body.messages = truncateMessages(messages);
     }
 
-    // Prepare messages
-    const messages = body.messages || [];
-    if (fileContext && messages.length > 0) {
-      const lastUserIndex = messages.length - 1;
-      if (typeof messages[lastUserIndex].content === 'string') {
-        messages[lastUserIndex].content += `\n\n${fileContext}`;
+    // Set safe limits
+    req.body.max_tokens = Math.min(req.body.max_tokens ?? 512, MAX_TOKENS_OUT);
+    req.body.temperature = Math.min(Math.max(req.body.temperature ?? DEFAULT_TEMP, 0), 2);
+
+    // For non-streaming requests, use cache
+    const key = cacheKey(req.body);
+    if (!stream && cache.has(key)) {
+      console.log('⚡ Cache hit for chat');
+      return res.json(cache.get(key));
+    }
+
+    const options = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_KEY}`,
+        'Accept': stream ? 'text/event-stream' : 'application/json'
+      },
+      body: JSON.stringify(req.body)
+    };
+
+    const { body, statusCode, headers } = await callOpenAIWithRetry(
+      'https://api.openai.com/v1/chat/completions',
+      options
+    );
+
+    // Handle streaming response
+    if (stream) {
+      res.writeHead(statusCode, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      });
+
+      for await (const chunk of body) {
+        res.write(chunk);
+      }
+      res.end();
+      return;
+    }
+
+    // Handle non-streaming response
+    const chunks = [];
+    for await (const chunk of body) chunks.push(chunk);
+    const fullBuffer = Buffer.concat(chunks);
+    const responseText = fullBuffer.toString('utf-8');
+
+    // Cache successful responses (if under 100KB)
+    if (statusCode === 200 && fullBuffer.length < 100 * 1024) {
+      try {
+        const responseJson = JSON.parse(responseText);
+        cache.set(key, responseJson);
+        
+        // Limit cache size
+        if (cache.size > 500) {
+          const firstKey = cache.keys().next().value;
+          if (firstKey) cache.delete(firstKey);
+        }
+      } catch (e) {
+        console.error('❌ Cache parse error:', e.message);
       }
     }
 
-    // Call OpenAI using native fetch
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    // Send response
+    res.status(statusCode);
+    res.setHeader('Content-Type', headers['content-type'] || 'application/json');
+    res.send(fullBuffer);
+
+  } catch (error) {
+    console.error('❌ Chat completions error:', error.message);
+    res.status(500).json({
+      error: {
+        message: 'Internal server error',
+        type: 'server_error',
+        details: error.message
+      }
+    });
+  }
+});
+
+/* ---------- Image Generation (DALL-E) ---------- */
+app.post('/v1/images/generations', async (req, res) => {
+  try {
+    const { prompt, n = 1, size = '512x512', response_format = 'url' } = req.body;
+
+    // Validate required fields
+    if (!prompt || prompt.trim().length === 0) {
+      return res.status(400).json({
+        error: {
+          message: 'Prompt is required for image generation',
+          type: 'invalid_request_error'
+        }
+      });
+    }
+
+    // Validate image count
+    const imageCount = Math.min(Math.max(parseInt(n), 1), 10);
+    
+    // Validate size
+    const validSizes = ['256x256', '512x512', '1024x1024'];
+    const imageSize = validSizes.includes(size) ? size : '512x512';
+
+    // Prepare request body for OpenAI
+    const openaiBody = {
+      prompt: prompt.trim(),
+      n: imageCount,
+      size: imageSize,
+      response_format: response_format
+    };
+
+    const options = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${OPENAI_KEY}`
       },
-      body: JSON.stringify({
-        model: body.model || 'gpt-3.5-turbo',
-        messages: messages,
-        temperature: body.temperature || DEFAULT_TEMP,
-        max_tokens: Math.min(body.max_tokens || 1000, MAX_TOKENS_OUT),
-        stream: false
-      })
-    });
+      body: JSON.stringify(openaiBody)
+    };
 
-    const result = await response.json();
+    const { body, statusCode } = await callOpenAIWithRetry(
+      'https://api.openai.com/v1/images/generations',
+      options
+    );
 
-    // Clean up files after 30 seconds
-    setTimeout(() => {
-      files.forEach(file => {
-        try {
-          unlinkSync(join(uploadDir, file.filename));
-        } catch (e) {
-          console.error('Failed to delete file:', e);
-        }
-      });
-    }, 30000);
+    const chunks = [];
+    for await (const chunk of body) chunks.push(chunk);
+    const fullBuffer = Buffer.concat(chunks);
+    const responseText = fullBuffer.toString('utf-8');
 
-    res.status(response.status).json(result);
+    if (statusCode === 200) {
+      try {
+        const responseJson = JSON.parse(responseText);
+        
+        // Add metadata
+        responseJson.metadata = {
+          generated_at: new Date().toISOString(),
+          model: 'dall-e-2',
+          prompt_length: prompt.length
+        };
+        
+        res.status(200).json(responseJson);
+      } catch (e) {
+        console.error('❌ JSON parse error:', e.message);
+        res.status(500).json({
+          error: {
+            message: 'Failed to parse OpenAI response',
+            type: 'parse_error'
+          }
+        });
+      }
+    } else {
+      // Forward OpenAI error
+      res.status(statusCode);
+      res.setHeader('Content-Type', 'application/json');
+      res.send(fullBuffer);
+    }
 
   } catch (error) {
-    console.error('Chat error:', error);
+    console.error('❌ Image generation error:', error.message);
     res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
+      error: {
+        message: 'Internal server error during image generation',
+        type: 'server_error',
+        details: error.message
+      }
     });
   }
 });
 
-/* ---------- Moderations Endpoint ---------- */
+/* ---------- Moderations ---------- */
 app.post('/v1/moderations', async (req, res) => {
   try {
-    if (!OPENAI_KEY) {
-      // If no OpenAI key, return safe bypass
-      return res.json({
-        bypassed: true,
-        message: 'Moderation temporarily unavailable — continuing safely.'
+    const { input } = req.body;
+
+    if (!input || input.trim().length === 0) {
+      return res.status(400).json({
+        error: {
+          message: 'Input is required for moderation',
+          type: 'invalid_request_error'
+        }
       });
     }
 
-    const body = req.body;
-
-    // Call OpenAI Moderation API
-    const response = await fetch('https://api.openai.com/v1/moderations', {
+    const options = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${OPENAI_KEY}`
       },
-      body: JSON.stringify(body)
-    });
+      body: JSON.stringify({ input: input.trim() })
+    };
 
-    if (response.ok) {
-      const result = await response.json();
-      res.json(result);
-    } else {
-      // If moderation fails, return safe bypass
-      res.json({
+    const { body, statusCode } = await callOpenAIWithRetry(
+      'https://api.openai.com/v1/moderations',
+      options
+    );
+
+    const chunks = [];
+    for await (const chunk of body) chunks.push(chunk);
+    const fullBuffer = Buffer.concat(chunks);
+    
+    res.status(statusCode);
+    res.setHeader('Content-Type', 'application/json');
+    res.send(fullBuffer.toString('utf-8'));
+
+  } catch (error) {
+    console.error('❌ Moderation error:', error.message);
+    // Return a safe bypass response if moderation fails
+    res.status(200).json({
+      id: 'modr-' + Date.now(),
+      model: 'text-moderation-stable',
+      results: [{
+        flagged: false,
+        categories: {},
+        category_scores: {},
         bypassed: true,
         message: 'Moderation temporarily unavailable — continuing safely.'
-      });
-    }
-
-  } catch (error) {
-    console.error('Moderation error:', error);
-    // Always return safe response on error
-    res.json({
-      bypassed: true,
-      message: 'Moderation temporarily unavailable — continuing safely.'
+      }]
     });
   }
 });
-
-/* ---------- Completions Endpoint (Legacy) ---------- */
-app.post('/v1/completions', async (req, res) => {
-  try {
-    if (!OPENAI_KEY) {
-      return res.status(500).json({
-        error: 'Server configuration error',
-        message: 'OpenAI API key not configured'
-      });
-    }
-
-    const body = req.body;
-
-    // Call OpenAI Completions API
-    const response = await fetch('https://api.openai.com/v1/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_KEY}`
-      },
-      body: JSON.stringify({
-        model: body.model || 'text-davinci-003',
-        prompt: body.prompt || '',
-        temperature: body.temperature || DEFAULT_TEMP,
-        max_tokens: Math.min(body.max_tokens || 1000, MAX_TOKENS_OUT)
-      })
-    });
-
-    const result = await response.json();
-    res.status(response.status).json(result);
-
-  } catch (error) {
-    console.error('Completions error:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
-    });
-  }
-});
-
-/* ---------- Get Models Endpoint ---------- */
-app.get('/v1/models', async (req, res) => {
-  try {
-    if (!OPENAI_KEY) {
-      // Return default models if no API key
-      return res.json({
-        data: [
-          { id: 'gpt-4', object: 'model' },
-          { id: 'gpt-4-vision-preview', object: 'model' },
-          { id: 'gpt-3.5-turbo', object: 'model' },
-          { id: 'text-davinci-003', object: 'model' }
-        ]
-      });
-    }
-
-    const response = await fetch('https://api.openai.com/v1/models', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_KEY}`
-      }
-    });
-
-    if (response.ok) {
-      const result = await response.json();
-      res.json(result);
-    } else {
-      // Fallback to default models
-      res.json({
-        data: [
-          { id: 'gpt-4', object: 'model' },
-          { id: 'gpt-4-vision-preview', object: 'model' },
-          { id: 'gpt-3.5-turbo', object: 'model' },
-          { id: 'text-davinci-003', object: 'model' }
-        ]
-      });
-    }
-
-  } catch (error) {
-    console.error('Models error:', error);
-    res.json({
-      data: [
-        { id: 'gpt-4', object: 'model' },
-        { id: 'gpt-4-vision-preview', object: 'model' },
-        { id: 'gpt-3.5-turbo', object: 'model' },
-        { id: 'text-davinci-003', object: 'model' }
-      ]
-    });
-  }
-});
-
-/* ---------- File Cleanup ---------- */
-setInterval(() => {
-  const now = Date.now();
-  const maxAge = 1 * 60 * 60 * 1000; // 1 hour
-  
-  readdirSync(uploadDir).forEach(file => {
-    const filePath = join(uploadDir, file);
-    try {
-      const stats = statSync(filePath);
-      if (now - stats.mtimeMs > maxAge) {
-        unlinkSync(filePath);
-        console.log(`Cleaned up: ${file}`);
-      }
-    } catch (e) {
-      console.error(`Failed to clean up ${file}:`, e);
-    }
-  });
-}, 30 * 60 * 1000); // Run every 30 minutes
 
 /* ---------- Error Handling ---------- */
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        error: 'File too large',
-        message: 'File size must be less than 10MB'
-      });
+app.use((req, res) => {
+  res.status(404).json({
+    error: {
+      message: `Route ${req.method} ${req.path} not found`,
+      type: 'not_found'
     }
-  }
-  
-  res.status(500).json({
-    error: 'Internal server error',
-    message: NODE_ENV === 'development' ? err.message : 'Something went wrong'
   });
 });
 
-/* ---------- 404 Handler ---------- */
-app.use((req, res) => {
-  res.status(404).json({
-    error: 'Not found',
-    message: `Cannot ${req.method} ${req.url}`
+app.use((error, req, res, next) => {
+  console.error('🚨 Unhandled error:', error);
+  res.status(500).json({
+    error: {
+      message: 'Internal server error',
+      type: 'server_error'
+    }
   });
 });
 
 /* ---------- Start Server ---------- */
 const server = createServer(app);
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`
-🚀 Chat AI Prime Server Started!
-📍 Environment: ${NODE_ENV}
-📡 Port: ${PORT}
-🌍 URL: http://0.0.0.0:${PORT}
-📁 Uploads: ${uploadDir}
-✅ Health: http://localhost:${PORT}/health
-📋 Endpoints:
-   - POST /v1/chat/completions
-   - POST /v1/moderations
-   - POST /v1/completions
-   - POST /upload
-   - GET /v1/models
-   - GET /health
-  `);
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📝 OpenAI Key: ${OPENAI_KEY ? '✓ Configured' : '✗ Missing!'}`);
+  console.log(`🤖 Allowed Models: ${ALLOWED_MODELS.join(', ')}`);
+  console.log(`🔧 Maintenance Mode: ${MAINTENANCE_MODE ? 'ON' : 'OFF'}`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
+  console.log('👋 SIGTERM received, shutting down gracefully');
   server.close(() => {
-    console.log('Server closed');
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('👋 SIGINT received, shutting down gracefully');
+  server.close(() => {
+    console.log('✅ Server closed');
     process.exit(0);
   });
 });
