@@ -224,12 +224,17 @@ app.post('/v1/images', async (req, res) => {
     const filePath = path.join(PUBLIC_DIR, fileName);
     fs.writeFileSync(filePath, imageBuffer);
 
-    res.json({
-      success: true,
-      imageUrl: `/public/${fileName}`,
-      model: "gpt-image-1",
-      created_at: new Date().toISOString()
-    });
+    const fullUrl = `${req.protocol}://${req.get("host")}/public/${fileName}`;
+
+res.json({
+  created: Date.now(),
+  data: [
+    {
+      url: fullUrl
+    }
+  ]
+});
+
 
   } catch (err) {
     console.error("❌ Image error:", err);
@@ -303,3 +308,4 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Chat model: gpt-4o-mini`);
   console.log('='.repeat(50));
 });
+
