@@ -180,7 +180,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-/* ---------- ✅ Image Generation (gpt-image-1) ---------- */
+/* ---------- ✅ Image Generation (dall-e-3) ---------- */
 app.post('/v1/images', async (req, res) => {
   try {
     const { prompt, size = "1024x1024" } = req.body;
@@ -189,14 +189,16 @@ app.post('/v1/images', async (req, res) => {
       return res.status(400).json({ error: { message: 'Prompt required' }});
     }
 
+    // --- FIX STARTS HERE ---
     const openaiBody = {
-      model: "gpt-image-1",
+      model: "dall-e-3", // Corrected: Use a valid model like dall-e-3
       prompt: prompt.trim(),
-      size
+      size,
+      response_format: "b64_json" // Corrected: Request base64 format from OpenAI
     };
 
     const { body, statusCode } = await callOpenAIWithRetry(
-      "https://api.openai.com/v1/images/generations",   // ✅ FIXED
+      "https://api.openai.com/v1/images/generations", // Corrected: Use the /generations endpoint
       {
         method: "POST",
         headers: {
@@ -206,18 +208,23 @@ app.post('/v1/images', async (req, res) => {
         body: JSON.stringify(openaiBody)
       }
     );
-
+    // --- FIX ENDS HERE ---
+    
     const chunks = [];
     for await (const c of body) chunks.push(c);
     const buffer = Buffer.concat(chunks);
     const json = JSON.parse(buffer.toString());
 
     if (statusCode !== 200) {
-      console.error("❌ OpenAI Image API Error:", json);
+      console.error("❌ OpenAI Error:", json);
       return res.status(statusCode).json(json);
     }
 
+    // Base64 → File
     const base64Image = json.data[0].b64_json;
+    if (!base64Image) {
+        throw new Error("Missing b64_json in OpenAI response");
+    }
     const imageBuffer = Buffer.from(base64Image, "base64");
 
     const fileName = `img_${Date.now()}.png`;
@@ -226,6 +233,7 @@ app.post('/v1/images', async (req, res) => {
 
     const fullUrl = `${req.protocol}://${req.get("host")}/public/${fileName}`;
 
+    // This response structure already matches what the Android app expects.
     res.json({
       created: Date.now(),
       data: [
@@ -236,15 +244,10 @@ app.post('/v1/images', async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Image error FULL:", err?.stack || err);
-    res.status(500).json({
-      error: {
-        message: err?.message || "Image generation failed"
-      }
-    });
+    console.error("❌ Image error:", err);
+    res.status(500).json({ error: { message: "Image generation failed" }});
   }
 });
-
 
 /* ---------- Image Upload ---------- */
 app.post('/v1/images/upload', upload.single('image'), async (req, res) => {
@@ -312,5 +315,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Chat model: gpt-4o-mini`);
   console.log('='.repeat(50));
 });
+
 
 
