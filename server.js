@@ -196,7 +196,7 @@ app.post('/v1/images', async (req, res) => {
     };
 
     const { body, statusCode } = await callOpenAIWithRetry(
-      "https://api.openai.com/v1/images",
+      "https://api.openai.com/v1/images/generations",   // ✅ FIXED
       {
         method: "POST",
         headers: {
@@ -213,10 +213,10 @@ app.post('/v1/images', async (req, res) => {
     const json = JSON.parse(buffer.toString());
 
     if (statusCode !== 200) {
+      console.error("❌ OpenAI Image API Error:", json);
       return res.status(statusCode).json(json);
     }
 
-    // Base64 → File
     const base64Image = json.data[0].b64_json;
     const imageBuffer = Buffer.from(base64Image, "base64");
 
@@ -226,21 +226,25 @@ app.post('/v1/images', async (req, res) => {
 
     const fullUrl = `${req.protocol}://${req.get("host")}/public/${fileName}`;
 
-res.json({
-  created: Date.now(),
-  data: [
-    {
-      url: fullUrl
-    }
-  ]
-});
-
+    res.json({
+      created: Date.now(),
+      data: [
+        {
+          url: fullUrl
+        }
+      ]
+    });
 
   } catch (err) {
-    console.error("❌ Image error:", err);
-    res.status(500).json({ error: { message: "Image generation failed" }});
+    console.error("❌ Image error FULL:", err?.stack || err);
+    res.status(500).json({
+      error: {
+        message: err?.message || "Image generation failed"
+      }
+    });
   }
 });
+
 
 /* ---------- Image Upload ---------- */
 app.post('/v1/images/upload', upload.single('image'), async (req, res) => {
@@ -308,4 +312,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Chat model: gpt-4o-mini`);
   console.log('='.repeat(50));
 });
+
 
