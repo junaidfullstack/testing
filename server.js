@@ -184,21 +184,25 @@ app.post('/v1/chat/completions', async (req, res) => {
 app.post('/v1/images', async (req, res) => {
   try {
     const { prompt, size = "1024x1024" } = req.body;
+    const isPro = req.headers['x-is-pro'] === 'true'; 
+
+    if (!isPro) {
+      return res.status(403).json({ error: { message: 'Image generation is a premium feature. Please upgrade to generate images.' }});
+    }
 
     if (!prompt?.trim()) {
       return res.status(400).json({ error: { message: 'Prompt required' }});
     }
 
-    // --- FIX STARTS HERE ---
     const openaiBody = {
-      model: "dall-e-3", // Corrected: Use a valid model like dall-e-3
+      model: "dall-e-3",
       prompt: prompt.trim(),
       size,
-      response_format: "b64_json" // Corrected: Request base64 format from OpenAI
+      response_format: "b64_json"
     };
 
     const { body, statusCode } = await callOpenAIWithRetry(
-      "https://api.openai.com/v1/images/generations", // Corrected: Use the /generations endpoint
+      "https://api.openai.com/v1/images/generations",
       {
         method: "POST",
         headers: {
@@ -208,7 +212,6 @@ app.post('/v1/images', async (req, res) => {
         body: JSON.stringify(openaiBody)
       }
     );
-    // --- FIX ENDS HERE ---
     
     const chunks = [];
     for await (const c of body) chunks.push(c);
@@ -220,7 +223,6 @@ app.post('/v1/images', async (req, res) => {
       return res.status(statusCode).json(json);
     }
 
-    // Base64 → File
     const base64Image = json.data[0].b64_json;
     if (!base64Image) {
         throw new Error("Missing b64_json in OpenAI response");
@@ -233,7 +235,6 @@ app.post('/v1/images', async (req, res) => {
 
     const fullUrl = `${req.protocol}://${req.get("host")}/public/${fileName}`;
 
-    // This response structure already matches what the Android app expects.
     res.json({
       created: Date.now(),
       data: [
@@ -315,6 +316,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Chat model: gpt-4o-mini`);
   console.log('='.repeat(50));
 });
+
 
 
 
