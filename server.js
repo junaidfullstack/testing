@@ -180,14 +180,34 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-/* ---------- ✅ Image Generation (dall-e-3) ---------- */
+/* ---------- ✅ Image Generation (dall-e-3) with Credit System ---------- */
 app.post('/v1/images', async (req, res) => {
   try {
     const { prompt, size = "1024x1024" } = req.body;
-    const isPro = req.headers['x-is-pro'] === 'true'; 
+    const isPro = req.headers['x-is-pro'] === 'true';
+    const remainingCredits = parseInt(req.headers['x-remaining-credits']) || 0;
+    
+    // Check if user has credits available
+    if (!isPro && remainingCredits <= 0) {
+      return res.status(403).json({ 
+        error: { 
+          message: 'No image generation credits remaining. Please upgrade to Pro or earn more credits.' 
+        } 
+      });
+    }
 
-    if (!isPro) {
-      return res.status(403).json({ error: { message: 'Image generation is a premium feature. Please upgrade to generate images.' }});
+    // For testing: allow one free image for non-pro users
+    // Remove this condition after testing
+    const isTesting = true; // Set to false in production
+    if (isTesting && !isPro && remainingCredits === 0) {
+      // Allow one free image for testing
+      console.log("🔧 TEST MODE: Allowing one free image for testing");
+    } else if (!isPro && remainingCredits <= 0) {
+      return res.status(403).json({ 
+        error: { 
+          message: 'No image generation credits remaining. Please upgrade to Pro or earn more credits.' 
+        } 
+      });
     }
 
     if (!prompt?.trim()) {
@@ -235,13 +255,16 @@ app.post('/v1/images', async (req, res) => {
 
     const fullUrl = `${req.protocol}://${req.get("host")}/public/${fileName}`;
 
+    // Return success with credit consumption info
     res.json({
       created: Date.now(),
       data: [
         {
           url: fullUrl
         }
-      ]
+      ],
+      credits_used: 1,
+      remaining_credits: isPro ? "unlimited" : Math.max(0, remainingCredits - 1)
     });
 
   } catch (err) {
@@ -316,6 +339,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Chat model: gpt-4o-mini`);
   console.log('='.repeat(50));
 });
+
 
 
 
