@@ -23,7 +23,6 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const MAX_INPUT_CHARS = Number(process.env.MAX_INPUT_CHARS || 8000);
 const MAX_TOKENS_OUT = Number(process.env.MAX_TOKENS_OUT || 1000);
 const DEFAULT_TEMP = Number(process.env.DEFAULT_TEMP || 0.7);
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 /* ---------- Express setup ---------- */
 const app = express();
@@ -37,20 +36,6 @@ if (!fs.existsSync(PUBLIC_DIR)) {
   fs.mkdirSync(PUBLIC_DIR);
 }
 app.use('/public', express.static(PUBLIC_DIR));
-
-/* ---------- File upload setup ---------- */
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_SIZE },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type.'));
-    }
-  }
-});
 
 /* ---------- Maintenance Mode ---------- */
 app.use((req, res, next) => {
@@ -114,7 +99,6 @@ app.get('/', (_req, res) => {
     endpoints: {
       chat: 'POST /v1/chat/completions',
       images: 'POST /v1/images',
-      upload: 'POST /v1/images/upload',
       moderations: 'POST /v1/moderations'
     },
     imageModel: 'gpt-image-1'
@@ -273,27 +257,6 @@ app.post('/v1/images', async (req, res) => {
   }
 });
 
-/* ---------- Image Upload ---------- */
-app.post('/v1/images/upload', upload.single('image'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: { message: 'No file uploaded' }});
-    }
-
-    const imageId = uuidv4();
-    const mockUrl = `https://api.dicebear.com/7.x/avatars/svg?seed=${imageId}`;
-
-    res.json({
-      id: imageId,
-      url: mockUrl,
-      uploaded_at: new Date().toISOString()
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: { message: 'Upload failed' }});
-  }
-});
-
 /* ---------- Moderations ---------- */
 app.post('/v1/moderations', async (req, res) => {
   try {
@@ -339,6 +302,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🤖 Chat model: gpt-4o-mini`);
   console.log('='.repeat(50));
 });
+
 
 
 
